@@ -6,95 +6,133 @@ import google.generativeai as genai
 import os
 
 # ==========================================
-# 1. 頁面與除錯設定
+# 1. 介面設計與 CSS 美化 (UI/UX 重點)
 # ==========================================
-st.set_page_config(page_title="海扶醫療問答 (診斷版)", page_icon="🩺")
-st.title("海扶醫療問答 🩺")
+st.set_page_config(
+    page_title="海扶醫療諮詢室",
+    page_icon="🏥",
+    layout="centered"
+)
 
-# 側邊欄：系統健康狀態
-st.sidebar.header("🔍 系統診斷資訊")
+# --- 客製化 CSS 樣式表 ---
+st.markdown("""
+<style>
+    /* 1. 整體背景與字體設定 */
+    .stApp {
+        background-color: #f9f9f9; /* 柔和灰白底色 */
+        font-family: "Microsoft JhengHei", "Helvetica", sans-serif;
+    }
+    
+    /* 2. 標題樣式 */
+    h1 {
+        color: #2E7D32; /* 醫學綠 */
+        font-weight: 700;
+        text-align: center;
+        padding-bottom: 20px;
+        border-bottom: 2px solid #e0e0e0;
+    }
+    
+    /* 3. 隱藏預設選單與側邊欄 (讓介面更乾淨) */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    [data-testid="stSidebar"] {display: none;}
+    
+    /* 4. 對話框優化 */
+    /* 使用者對話框 */
+    [data-testid="chatAvatarIcon-user"] {
+        background-color: #4CAF50;
+    }
+    
+    /* 助理對話框背景優化 */
+    .stChatMessage {
+        background-color: #ffffff;
+        border-radius: 15px;
+        padding: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        margin-bottom: 10px;
+        border: 1px solid #f0f0f0;
+    }
+
+    /* 連結顏色 */
+    a {
+        color: #2E7D32 !important;
+        font-weight: bold;
+        text-decoration: none;
+    }
+    a:hover {
+        text-decoration: underline;
+    }
+    
+    /* 輸入框區域優化 */
+    .stChatInputContainer {
+        padding-bottom: 20px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# 標題區
+st.title("🏥 海扶及達文西醫療諮詢")
+st.markdown(
+    """
+    <div style='text-align: center; color: #666; margin-bottom: 30px; font-size: 1.1em;'>
+    歡迎來到陳威君醫師的 AI 諮詢室。<br>
+    請在下方輸入您的疑問，我將為您提供初步解答。
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
+
+# ==========================================
+# 2. 系統設定 (後台運作，不顯示給使用者)
+# ==========================================
 
 # 讀取 API Key
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=api_key)
-    st.sidebar.success("API Key 已讀取")
 else:
-    st.error("❌ 尚未設定 Google API Key。")
+    st.error("系統維護中 (API Key Missing)，請稍後再試。")
     st.stop()
 
-# ==========================================
-# 2. 核心：絕對動態模型選擇器 (抓到什麼用什麼)
-# ==========================================
+# --- 靜默模型選擇器 (不再顯示文字) ---
 @st.cache_resource
-def get_available_models():
-    """
-    強制的模型偵測：
-    1. 列出所有模型。
-    2. 不管名稱叫什麼，只要支援 generateContent 就拿來當聊天模型。
-    3. 只要支援 embedContent 就拿來當嵌入模型。
-    """
-    chat_models = []
-    embed_models = []
+def get_best_models_silently():
+    """後台自動挑選最佳模型，不報錯，不顯示"""
+    chat_model = "models/gemini-pro"
+    embed_model = "models/embedding-001"
     
     try:
-        # 嘗試列出所有模型
-        for m in genai.list_models():
-            # 判斷是否支援對話
-            if 'generateContent' in m.supported_generation_methods:
-                chat_models.append(m.name)
-            # 判斷是否支援嵌入
-            if 'embedContent' in m.supported_generation_methods:
-                embed_models.append(m.name)
+        # 取得所有可用模型
+        all_models = [m for m in genai.list_models()]
         
-        return chat_models, embed_models
-    except Exception as e:
-        st.sidebar.error(f"無法列出模型清單: {e}")
-        return [], []
-
-# 執行偵測
-ALL_CHAT_MODELS, ALL_EMBED_MODELS = get_available_models()
-
-# 顯示偵測結果在側邊欄 (讓使用者知道發生什麼事)
-st.sidebar.write("---")
-st.sidebar.subheader("可用的聊天模型：")
-st.sidebar.json(ALL_CHAT_MODELS)
-st.sidebar.subheader("可用的嵌入模型：")
-st.sidebar.json(ALL_EMBED_MODELS)
-
-# 決策邏輯：優先順序
-def select_best_model(model_list, priority_keywords):
-    if not model_list:
-        return None
+        # 1. 挑選聊天模型 (優先順序: 1.5-Flash -> 1.5-Pro -> 1.0-Pro)
+        chat_candidates = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
+        
+        if any('gemini-1.5-flash' in m for m in chat_candidates):
+            chat_model = next(m for m in chat_candidates if 'gemini-1.5-flash' in m)
+        elif any('gemini-1.5-pro' in m for m in chat_candidates):
+            chat_model = next(m for m in chat_candidates if 'gemini-1.5-pro' in m)
+        elif chat_candidates:
+            chat_model = chat_candidates[0] # 隨便選一個能用的
+            
+        # 2. 挑選嵌入模型 (優先順序: text-embedding-004 -> embedding-001)
+        embed_candidates = [m.name for m in all_models if 'embedContent' in m.supported_generation_methods]
+        
+        if any('text-embedding-004' in m for m in embed_candidates):
+            embed_model = next(m for m in embed_candidates if 'text-embedding-004' in m)
+        elif embed_candidates:
+            embed_model = embed_candidates[0]
+            
+    except:
+        pass # 發生任何錯誤都使用預設值
     
-    # 嘗試尋找優先關鍵字
-    for keyword in priority_keywords:
-        for model in model_list:
-            if keyword in model:
-                return model
-    
-    # 如果都沒對中，直接回傳第一個能用的 (絕不回傳假字串)
-    return model_list[0]
+    return chat_model, embed_model
 
-# 選定模型
-FINAL_CHAT_MODEL = select_best_model(ALL_CHAT_MODELS, ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"])
-FINAL_EMBED_MODEL = select_best_model(ALL_EMBED_MODELS, ["text-embedding-004", "embedding-001"])
-
-if not FINAL_CHAT_MODEL:
-    st.error("❌ 嚴重錯誤：您的 API Key 無法存取任何聊天模型。請檢查 Google AI Studio 的 API 權限。")
-    st.stop()
-
-if not FINAL_EMBED_MODEL:
-    st.error("❌ 嚴重錯誤：您的 API Key 無法存取任何嵌入模型。")
-    st.stop()
-
-st.sidebar.write("---")
-st.sidebar.success(f"✅ 最終選用聊天模型: {FINAL_CHAT_MODEL}")
-st.sidebar.success(f"✅ 最終選用嵌入模型: {FINAL_EMBED_MODEL}")
-
+# 執行靜默偵測
+CHAT_MODEL, EMBED_MODEL = get_best_models_silently()
 
 # ==========================================
-# 3. 定義 Embedding (使用選定的模型)
+# 3. 資料庫邏輯
 # ==========================================
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
@@ -102,21 +140,16 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
         for text in input:
             try:
                 response = genai.embed_content(
-                    model=FINAL_EMBED_MODEL, # 絕對使用偵測到的模型
+                    model=EMBED_MODEL,
                     content=text,
                     task_type="retrieval_query"
                 )
                 embeddings.append(response['embedding'])
-            except Exception as e:
-                # 若失敗，印出錯誤但不崩潰
-                print(f"Embedding error: {e}")
+            except:
                 embeddings.append([0.0]*768)
         return embeddings
 
-# ==========================================
-# 4. 初始化資料庫
-# ==========================================
-@st.cache_resource(show_spinner="正在載入資料庫...")
+@st.cache_resource(show_spinner="正在準備醫療資料庫...")
 def initialize_vector_db():
     client = chromadb.Client()
     collection = client.get_or_create_collection(
@@ -140,67 +173,88 @@ def initialize_vector_db():
                         metadatas=[{"question": q} for q in questions],
                         ids=ids
                     )
-                else:
-                    st.error("Excel 格式錯誤。")
-            except Exception as e:
-                st.error(f"讀取 Excel 失敗: {e}")
+            except:
+                pass 
     return collection
 
 try:
     collection = initialize_vector_db()
-except Exception as e:
-    st.error(f"資料庫錯誤: {e}")
+except:
+    st.error("資料庫連線異常，請重新整理頁面。")
     st.stop()
 
 # ==========================================
-# 5. 聊天邏輯
+# 4. 對話邏輯
 # ==========================================
+
+# 初始化訊息
 if "messages" not in st.session_state:
     st.session_state.messages = []
+    # 可以加入一個歡迎訊息
+    st.session_state.messages.append({
+        "role": "assistant", 
+        "content": "您好，我是陳醫師的 AI 小幫手。請問有什麼我可以幫您的嗎？<br>(例如：海扶刀術後多久可以上班？)"
+    })
 
+# 顯示歷史訊息
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
 
-if prompt := st.chat_input("請輸入您的醫療問題..."):
+# 接收使用者輸入 (位於底部是 Streamlit 的標準設計，適合手機操作)
+if prompt := st.chat_input("請輸入您的問題..."):
+    # 顯示使用者問題
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    try:
-        results = collection.query(query_texts=[prompt], n_results=1)
-        distance = results['distances'][0][0] if results['distances'] else 1.0
-        best_answer = results['documents'][0][0] if results['documents'] else ""
+    final_response = ""
+    
+    # 搜尋與生成 (使用更人性化的提示文字)
+    with st.spinner('🤖 醫師小幫手正在查閱資料...'):
+        try:
+            # 1. 搜尋
+            results = collection.query(query_texts=[prompt], n_results=1)
+            distance = results['distances'][0][0] if results['distances'] else 1.0
+            best_answer = results['documents'][0][0] if results['documents'] else ""
 
-        THRESHOLD = 0.65 
+            # 2. 判斷信心度
+            THRESHOLD = 0.65 
 
-        if distance > THRESHOLD:
-            final_response = (
-                "這個問題比較複雜，建議您至門診進一步諮詢醫師。<br><br>"
-                "<b>🏥 門診時間：</b><br>"
-                "- 林口長庚醫院：週二上午、週六下午<br>"
-                "- 土城醫院：週二下午、週六上午"
-            )
-        else:
-            with st.spinner(f'🤖 AI ({FINAL_CHAT_MODEL}) 思考中...'):
-                # 使用偵測到的模型
-                model = genai.GenerativeModel(FINAL_CHAT_MODEL)
+            if distance > THRESHOLD:
+                final_response = (
+                    "這個問題比較複雜，建議您直接至門診諮詢醫師，以獲得最準確的評估。<br><br>"
+                    "<b>🏥 門診資訊：</b><br>"
+                    "• 林口長庚：週二上午、週六下午<br>"
+                    "• 土城醫院：週二下午、週六上午<br><br>"
+                    "💁‍♀️ 專人諮詢：<a href='https://line.me/R/ti/p/@hifudr' target='_blank'>點此聯繫 Line 小編</a>"
+                )
+            else:
+                # 3. AI 生成 (使用先前靜默偵測到的模型)
+                model = genai.GenerativeModel(CHAT_MODEL)
                 
                 system_prompt = f"""
-                你是專業的醫療助理。
-                使用者問題：{prompt}
-                標準答案：{best_answer}
-                請根據標準答案親切回答。
+                你是一位專業、親切且溫暖的婦科諮詢助理，隸屬於陳威君醫師團隊。
+                
+                【使用者問題】{prompt}
+                【資料庫答案】{best_answer}
+                
+                請根據「資料庫答案」重新撰寫回覆：
+                1. 語氣要像真人一樣溫暖、有同理心，不要像機器人。
+                2. 保持專業，不要編造事實。
+                3. 排版要清晰易讀 (適當分段)。
+                4. 不要提到「根據資料庫」或「標準答案」這類字眼，直接回答即可。
                 """
                 
                 response = model.generate_content(system_prompt)
                 final_response = response.text + (
                     "<br><br>---<br>"
-                    "如有疑問，歡迎 <a href='https://line.me/R/ti/p/@hifudr' target='_blank'>Line 線上諮詢</a>。"
+                    "如有更多疑問，歡迎 <a href='https://line.me/R/ti/p/@hifudr' target='_blank'>Line 線上諮詢</a>"
                 )
+                
+        except Exception:
+            final_response = "抱歉，系統網路忙碌中，請稍後再試，或直接聯繫 Line 小編。"
 
-    except Exception as e:
-        final_response = f"系統錯誤: {e}"
-
+    # 顯示回覆
     with st.chat_message("assistant"):
         st.markdown(final_response, unsafe_allow_html=True)
     st.session_state.messages.append({"role": "assistant", "content": final_response})
