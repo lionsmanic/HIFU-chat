@@ -6,94 +6,117 @@ import google.generativeai as genai
 import os
 
 # ==========================================
-# 1. 頁面設定與金鑰讀取
+# 1. 頁面與除錯設定
 # ==========================================
-st.set_page_config(page_title="海扶及達文西問答小幫手", page_icon="🤖")
-st.title("海扶及達文西問答小幫手 🤖")
+st.set_page_config(page_title="海扶醫療問答 (診斷版)", page_icon="🩺")
+st.title("海扶醫療問答 🩺")
+
+# 側邊欄：系統健康狀態
+st.sidebar.header("🔍 系統診斷資訊")
 
 # 讀取 API Key
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=api_key)
+    st.sidebar.success("API Key 已讀取")
 else:
     st.error("❌ 尚未設定 Google API Key。")
     st.stop()
 
 # ==========================================
-# 2. 核心修正：自動找出能用的模型名稱
+# 2. 核心：絕對動態模型選擇器 (抓到什麼用什麼)
 # ==========================================
 @st.cache_resource
-def get_valid_models():
+def get_available_models():
     """
-    不猜測名稱，直接列出帳號可用的所有模型，並分類回傳。
+    強制的模型偵測：
+    1. 列出所有模型。
+    2. 不管名稱叫什麼，只要支援 generateContent 就拿來當聊天模型。
+    3. 只要支援 embedContent 就拿來當嵌入模型。
     """
-    chat_model = "models/gemini-pro" # 預設保底
-    embed_model = "models/embedding-001" # 預設保底
-
+    chat_models = []
+    embed_models = []
+    
     try:
-        print("正在偵測可用模型...")
-        # 列出所有模型
+        # 嘗試列出所有模型
         for m in genai.list_models():
-            # 找聊天模型
+            # 判斷是否支援對話
             if 'generateContent' in m.supported_generation_methods:
-                # 優先抓 1.5 Flash 或 Pro
-                if 'gemini-1.5-flash' in m.name:
-                    chat_model = m.name
-                elif 'gemini-1.5-pro' in m.name and 'flash' not in chat_model:
-                    chat_model = m.name
-            
-            # 找嵌入模型 (這就是您報錯的地方)
+                chat_models.append(m.name)
+            # 判斷是否支援嵌入
             if 'embedContent' in m.supported_generation_methods:
-                # 優先抓 text-embedding-004，抓不到就用任何一個能用的
-                if 'text-embedding-004' in m.name:
-                    embed_model = m.name
-                elif 'embedding-001' in m.name and 'text-embedding' not in embed_model:
-                    embed_model = m.name
+                embed_models.append(m.name)
         
-        print(f"✅ 自動鎖定聊天模型: {chat_model}")
-        print(f"✅ 自動鎖定嵌入模型: {embed_model}")
-        return chat_model, embed_model
-
+        return chat_models, embed_models
     except Exception as e:
-        st.error(f"模型偵測失敗，將使用預設值。錯誤: {e}")
-        return chat_model, embed_model
+        st.sidebar.error(f"無法列出模型清單: {e}")
+        return [], []
 
 # 執行偵測
-VALID_CHAT_MODEL, VALID_EMBED_MODEL = get_valid_models()
+ALL_CHAT_MODELS, ALL_EMBED_MODELS = get_available_models()
+
+# 顯示偵測結果在側邊欄 (讓使用者知道發生什麼事)
+st.sidebar.write("---")
+st.sidebar.subheader("可用的聊天模型：")
+st.sidebar.json(ALL_CHAT_MODELS)
+st.sidebar.subheader("可用的嵌入模型：")
+st.sidebar.json(ALL_EMBED_MODELS)
+
+# 決策邏輯：優先順序
+def select_best_model(model_list, priority_keywords):
+    if not model_list:
+        return None
+    
+    # 嘗試尋找優先關鍵字
+    for keyword in priority_keywords:
+        for model in model_list:
+            if keyword in model:
+                return model
+    
+    # 如果都沒對中，直接回傳第一個能用的 (絕不回傳假字串)
+    return model_list[0]
+
+# 選定模型
+FINAL_CHAT_MODEL = select_best_model(ALL_CHAT_MODELS, ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"])
+FINAL_EMBED_MODEL = select_best_model(ALL_EMBED_MODELS, ["text-embedding-004", "embedding-001"])
+
+if not FINAL_CHAT_MODEL:
+    st.error("❌ 嚴重錯誤：您的 API Key 無法存取任何聊天模型。請檢查 Google AI Studio 的 API 權限。")
+    st.stop()
+
+if not FINAL_EMBED_MODEL:
+    st.error("❌ 嚴重錯誤：您的 API Key 無法存取任何嵌入模型。")
+    st.stop()
+
+st.sidebar.write("---")
+st.sidebar.success(f"✅ 最終選用聊天模型: {FINAL_CHAT_MODEL}")
+st.sidebar.success(f"✅ 最終選用嵌入模型: {FINAL_EMBED_MODEL}")
+
 
 # ==========================================
-# 3. 定義 Embedding (使用偵測到的模型)
+# 3. 定義 Embedding (使用選定的模型)
 # ==========================================
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
         embeddings = []
         for text in input:
             try:
-                # 使用剛剛偵測到的 VALID_EMBED_MODEL
                 response = genai.embed_content(
-                    model=VALID_EMBED_MODEL,
+                    model=FINAL_EMBED_MODEL, # 絕對使用偵測到的模型
                     content=text,
                     task_type="retrieval_query"
                 )
                 embeddings.append(response['embedding'])
             except Exception as e:
-                # 萬一還是錯，嘗試最後一招：舊版名稱
-                try:
-                    response = genai.embed_content(
-                        model="models/embedding-001",
-                        content=text,
-                        task_type="retrieval_query"
-                    )
-                    embeddings.append(response['embedding'])
-                except:
-                    print(f"Embedding 完全失敗: {e}")
-                    embeddings.append([0.0]*768) # 避免當機
+                # 若失敗，印出錯誤但不崩潰
+                print(f"Embedding error: {e}")
+                embeddings.append([0.0]*768)
         return embeddings
 
 # ==========================================
 # 4. 初始化資料庫
 # ==========================================
-@st.cache_resource(show_spinner="正在讀取資料...")
+@st.cache_resource(show_spinner="正在載入資料庫...")
 def initialize_vector_db():
     client = chromadb.Client()
     collection = client.get_or_create_collection(
@@ -158,9 +181,9 @@ if prompt := st.chat_input("請輸入您的醫療問題..."):
                 "- 土城醫院：週二下午、週六上午"
             )
         else:
-            with st.spinner('🤖 AI 思考中...'):
-                # 使用偵測到的 VALID_CHAT_MODEL
-                model = genai.GenerativeModel(VALID_CHAT_MODEL)
+            with st.spinner(f'🤖 AI ({FINAL_CHAT_MODEL}) 思考中...'):
+                # 使用偵測到的模型
+                model = genai.GenerativeModel(FINAL_CHAT_MODEL)
                 
                 system_prompt = f"""
                 你是專業的醫療助理。
@@ -176,7 +199,7 @@ if prompt := st.chat_input("請輸入您的醫療問題..."):
                 )
 
     except Exception as e:
-        final_response = f"系統發生錯誤，請稍後再試。(錯誤代碼: {e})"
+        final_response = f"系統錯誤: {e}"
 
     with st.chat_message("assistant"):
         st.markdown(final_response, unsafe_allow_html=True)
