@@ -1,5 +1,5 @@
 # ==========================================
-# 0. 系統環境修正 (SQLite Fix) - 必放第一行
+# 0. 系統環境修正 (SQLite Fix)
 # ==========================================
 import pysqlite3
 import sys
@@ -23,7 +23,6 @@ st.markdown("""
     h1 { color: #2E7D32; font-weight: 700; border-bottom: 2px solid #e0e0e0; padding-bottom: 15px; }
     [data-testid="stSidebar"] {display: none;}
     .stChatMessage { border-radius: 15px; border: 1px solid #f0f0f0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    a { color: #2E7D32 !important; font-weight: bold; text-decoration: none; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -36,7 +35,7 @@ st.markdown(
 )
 
 # ==========================================
-# 2. 自動模型偵測 (修正版：預設使用舊模型以保安全)
+# 2. 暴力抓取可用模型 (不挑食邏輯)
 # ==========================================
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -46,35 +45,52 @@ else:
     st.stop()
 
 @st.cache_resource
-def get_working_models():
-    """自動偵測帳號可用的模型名稱"""
-    # --- 關鍵修正：預設值改為最舊版，確保不報錯 ---
-    chat_model = "models/gemini-pro" 
-    embed_model = "models/text-embedding-004" 
+def get_first_available_model():
+    """
+    不指定名稱，直接抓取帳號內第一個能用的模型。
+    """
+    chat_model = None
+    embed_model = None
     
     try:
+        # 1. 取得所有模型
         all_models = list(genai.list_models())
-        model_names = [m.name for m in all_models]
         
-        # 1. 找聊天模型 (優先順序：Flash -> Pro -> 預設)
-        if any('gemini-1.5-flash' in m for m in model_names):
-            chat_model = next(m for m in model_names if 'gemini-1.5-flash' in m)
-        elif any('gemini-1.5-pro' in m for m in model_names):
-            chat_model = next(m for m in model_names if 'gemini-1.5-pro' in m)
-            
-        # 2. 找嵌入模型
-        if any('text-embedding-004' in m for m in model_names):
-            embed_model = next(m for m in model_names if 'text-embedding-004' in m)
-            
-        return chat_model, embed_model
-    except:
-        # 如果偵測失敗，直接回傳預設值 (gemini-pro)，不再嘗試 Flash
-        return chat_model, embed_model
+        # 2. 隨便抓一個能聊天的
+        for m in all_models:
+            if 'generateContent' in m.supported_generation_methods:
+                chat_model = m.name
+                # 優先抓包含 'gemini' 的，比較保險
+                if 'gemini' in m.name:
+                    break 
+        
+        # 3. 隨便抓一個能嵌入的
+        for m in all_models:
+            if 'embedContent' in m.supported_generation_methods:
+                embed_model = m.name
+                if 'text-embedding' in m.name:
+                    break
 
-VALID_CHAT_MODEL, VALID_EMBED_MODEL = get_working_models()
+        return chat_model, embed_model, [m.name for m in all_models]
+
+    except Exception as e:
+        st.error(f"連線失敗: {e}")
+        return None, None, []
+
+# 執行抓取
+VALID_CHAT_MODEL, VALID_EMBED_MODEL, DEBUG_LIST = get_first_available_model()
+
+# --- 診斷資訊 (成功後可註解掉) ---
+if not VALID_CHAT_MODEL:
+    st.error("❌ 您的帳號沒有任何可用的聊天模型。請檢查 Google AI Studio 是否已啟用 API。")
+    st.write("偵測到的所有模型:", DEBUG_LIST)
+    st.stop()
+else:
+    # 顯示目前抓到的模型，讓您知道它最後選了誰
+    st.toast(f"已自動鎖定模型: {VALID_CHAT_MODEL}", icon="🤖")
 
 # ==========================================
-# 3. 資料庫邏輯 (含維度修正 v2)
+# 3. 資料庫邏輯 (資料庫名稱 v3 - 強制重置)
 # ==========================================
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
@@ -87,24 +103,17 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
                     task_type="retrieval_query"
                 )
                 embeddings.append(response['embedding'])
-            except Exception:
-                # 備用方案：嘗試舊版 Embedding
-                try:
-                    res = genai.embed_content(model="models/embedding-001", content=text)
-                    embeddings.append(res['embedding'])
-                except:
-                    # 補零防當機
-                    embeddings.append([0.0] * 768)
+            except:
+                embeddings.append([0.0] * 768) # 失敗補零
         return embeddings
 
-@st.cache_resource(show_spinner="正在更新醫療資料庫...")
+@st.cache_resource(show_spinner="正在建立醫療資料庫...")
 def initialize_vector_db():
     try:
         client = chromadb.Client()
-        
-        # 維持 v2 名稱，確保使用新維度
+        # 改名 v3 強制重新建立，避免維度衝突
         collection = client.get_or_create_collection(
-            name="medical_faq_v2",  
+            name="medical_faq_v3",  
             embedding_function=GeminiEmbeddingFunction()
         )
 
@@ -116,7 +125,6 @@ def initialize_vector_db():
                 answers = data['回覆'].astype(str).tolist()
                 ids = [f"id-{i}" for i in range(len(questions))]
                 
-                # 分批寫入
                 batch_size = 20
                 for i in range(0, len(questions), batch_size):
                     end = min(i + batch_size, len(questions))
@@ -127,7 +135,7 @@ def initialize_vector_db():
                     )
         return collection
     except Exception as e:
-        st.error(f"資料庫初始化失敗: {str(e)}")
+        st.error(f"資料庫錯誤: {str(e)}")
         return None
 
 collection = initialize_vector_db()
@@ -163,7 +171,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
             distance = results['distances'][0][0] if results['distances'] else 1.0
             best_answer = results['documents'][0][0] if results['documents'] else ""
 
-            # 2. 判斷信心度 (門檻微調)
+            # 2. 判斷
             THRESHOLD = 0.75 
 
             if distance > THRESHOLD:
@@ -175,7 +183,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
                     "💁‍♀️ 專人諮詢：<a href='https://line.me/R/ti/p/@hifudr' target='_blank'>點此聯繫 Line 小編</a>"
                 )
             else:
-                # 3. AI 生成
+                # 3. AI 生成 (使用自動抓到的 VALID_CHAT_MODEL)
                 model = genai.GenerativeModel(VALID_CHAT_MODEL)
                 
                 system_prompt = f"""
@@ -195,8 +203,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
                 )
 
         except Exception as e:
-            # 萬一還是出錯，顯示最後使用的模型名稱以供查核
-            final_response = f"⚠️ 系統發生錯誤 (使用模型: {VALID_CHAT_MODEL})。<br>錯誤訊息: {str(e)}"
+            final_response = f"⚠️ 系統發生錯誤 (Code: {e})。請聯繫管理員。"
 
     with st.chat_message("assistant"):
         st.markdown(final_response, unsafe_allow_html=True)
