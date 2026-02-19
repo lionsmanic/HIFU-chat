@@ -36,7 +36,7 @@ st.markdown(
 )
 
 # ==========================================
-# 2. 絕對模型偵測 (Debug 顯示區)
+# 2. 自動模型偵測
 # ==========================================
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -46,82 +46,40 @@ else:
     st.stop()
 
 @st.cache_resource
-def select_working_models():
-    """
-    強制列出所有模型，並從中挑選，不使用任何預設值。
-    """
+def get_working_models():
+    """自動偵測帳號可用的模型名稱"""
+    chat_model = "models/gemini-1.5-flash" # 預設
+    embed_model = "models/text-embedding-004" # 預設
+    
     try:
-        # 1. 取得所有模型清單
         all_models = list(genai.list_models())
         model_names = [m.name for m in all_models]
         
-        # 除錯資訊：顯示在畫面上讓使用者看到
-        with st.expander("🔍 (除錯用) 您的 API Key 可用模型清單", expanded=False):
-            st.write(model_names)
-
-        # 2. 挑選聊天模型 (優先順序: 1.5-Flash -> 1.5-Pro -> 任何 Chat)
-        chat_model = None
-        # 優先找 Flash
-        for m in model_names:
-            if 'gemini-1.5-flash' in m and 'latest' in m: # 優先找 latest
-                chat_model = m
-                break
-        if not chat_model:
-             for m in model_names:
-                if 'gemini-1.5-flash' in m:
-                    chat_model = m
-                    break
-        # 找不到 Flash 找 Pro
-        if not chat_model:
-            for m in model_names:
-                if 'gemini-1.5-pro' in m:
-                    chat_model = m
-                    break
-        # 真的都沒有，隨便找一個支援生成的
-        if not chat_model:
-            for m in all_models:
-                if 'generateContent' in m.supported_generation_methods:
-                    chat_model = m.name
-                    break
-        
-        # 3. 挑選嵌入模型
-        embed_model = None
-        for m in model_names:
-            if 'text-embedding-004' in m:
-                embed_model = m
-                break
-        if not embed_model:
-             for m in all_models:
-                if 'embedContent' in m.supported_generation_methods:
-                    embed_model = m.name
-                    break
-
+        # 1. 找聊天模型
+        if any('gemini-1.5-flash' in m for m in model_names):
+            chat_model = next(m for m in model_names if 'gemini-1.5-flash' in m)
+        elif any('gemini-1.5-pro' in m for m in model_names):
+            chat_model = next(m for m in model_names if 'gemini-1.5-pro' in m)
+            
+        # 2. 找嵌入模型
+        if any('text-embedding-004' in m for m in model_names):
+            embed_model = next(m for m in model_names if 'text-embedding-004' in m)
+            
+        return chat_model, embed_model
+    except:
         return chat_model, embed_model
 
-    except Exception as e:
-        st.error(f"❌ 無法連線至 Google 取得模型清單: {e}")
-        return None, None
-
-# 執行偵測
-VALID_CHAT_MODEL, VALID_EMBED_MODEL = select_working_models()
-
-if not VALID_CHAT_MODEL:
-    st.error("❌ 找不到可用的聊天模型。請展開上方的「除錯用」清單檢查您的 Key 是否有權限。")
-    st.stop()
-    
-if not VALID_EMBED_MODEL:
-    st.error("❌ 找不到可用的嵌入模型。")
-    st.stop()
+VALID_CHAT_MODEL, VALID_EMBED_MODEL = get_working_models()
 
 # ==========================================
-# 3. 資料庫邏輯 (含格式修正)
+# 3. 資料庫邏輯 (核心修正：資料庫改名重練)
 # ==========================================
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
         embeddings = []
-        # 逐筆處理，確保格式正確 (解決 expected list of floats 錯誤)
         for text in input:
             try:
+                # 這裡不強制維度，讓它自然產生，因為我們換新資料庫了
                 response = genai.embed_content(
                     model=VALID_EMBED_MODEL,
                     content=text,
@@ -129,19 +87,27 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
                 )
                 embeddings.append(response['embedding'])
             except Exception:
-                # 失敗時補零，避免崩潰
-                embeddings.append([0.0] * 768)
+                # 備用方案
+                try:
+                    res = genai.embed_content(model="models/embedding-001", content=text)
+                    embeddings.append(res['embedding'])
+                except:
+                    embeddings.append([0.0] * 768)
         return embeddings
 
-@st.cache_resource(show_spinner="正在準備醫療資料庫...")
+@st.cache_resource(show_spinner="正在更新醫療資料庫...")
 def initialize_vector_db():
     try:
         client = chromadb.Client()
+        
+        # --- 🔑 關鍵修正點：改名為 v2 ---
+        # 這會強制系統忽略舊的 768 維度資料庫，重新建立一個支援 3072 的新資料庫
         collection = client.get_or_create_collection(
-            name="medical_faq",
+            name="medical_faq_v2",  
             embedding_function=GeminiEmbeddingFunction()
         )
 
+        # 只要是 v2 新建立的，裡面一定是空的，就會自動重新載入 Excel
         if collection.count() == 0:
             excel_file = "網路問答.xlsx"
             if os.path.exists(excel_file):
@@ -150,7 +116,7 @@ def initialize_vector_db():
                 answers = data['回覆'].astype(str).tolist()
                 ids = [f"id-{i}" for i in range(len(questions))]
                 
-                # 簡單分批
+                # 分批寫入
                 batch_size = 20
                 for i in range(0, len(questions), batch_size):
                     end = min(i + batch_size, len(questions))
@@ -197,8 +163,8 @@ if prompt := st.chat_input("請輸入您的問題..."):
             distance = results['distances'][0][0] if results['distances'] else 1.0
             best_answer = results['documents'][0][0] if results['documents'] else ""
 
-            # 2. 判斷信心度
-            THRESHOLD = 0.65 
+            # 2. 判斷信心度 (門檻稍微調鬆一點以適應新維度)
+            THRESHOLD = 0.75 
 
             if distance > THRESHOLD:
                 final_response = (
