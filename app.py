@@ -13,15 +13,16 @@ import google.generativeai as genai
 import os
 
 # ==========================================
-# 1. 介面設計 (LINE 風格 + 專業形象優化)
+# 1. 介面設計 (LINE 風格 + 法規安全優化)
 # ==========================================
-st.set_page_config(page_title="海扶醫療諮詢", page_icon="🏥", layout="centered")
+# 網頁標籤改為 "衛教資訊"，避開 "諮詢"
+st.set_page_config(page_title="海扶及達文西衛教資訊", page_icon="🏥", layout="centered")
 
 st.markdown("""
 <style>
     /* 1. 全域設定 - LINE 風格灰藍底色 */
     .stApp {
-        background-color: #9bbbd4; /* LINE 經典背景色 */
+        background-color: #9bbbd4;
         font-family: "Microsoft JhengHei", "Heiti TC", sans-serif !important;
     }
     
@@ -33,7 +34,7 @@ st.markdown("""
         box-shadow: 0 10px 20px rgba(0,0,0,0.1);
         margin-bottom: 25px;
         text-align: center;
-        border-top: 5px solid #2E7D32; /* 頂部加一道專業綠條 */
+        border-top: 5px solid #2E7D32;
     }
     
     /* 3. 超大醫師頭像樣式 */
@@ -44,14 +45,14 @@ st.markdown("""
         height: 110px;
         line-height: 110px;
         border-radius: 50%;
-        margin: 0 auto 15px auto; /* 置中 */
+        margin: 0 auto 15px auto;
         box-shadow: 0 4px 10px rgba(0,0,0,0.15);
         border: 3px solid #ffffff;
     }
     
     /* 4. 標題字體優化 */
     .main-title {
-        color: #1b5e20; /* 深醫學綠，更穩重 */
+        color: #1b5e20;
         font-weight: 900;
         font-size: 32px;
         margin-bottom: 8px;
@@ -65,22 +66,26 @@ st.markdown("""
         margin-bottom: 5px;
     }
     
+    /* 5. 免責聲明樣式 (法規保護傘) */
     .disclaimer {
-        font-size: 15px;
-        color: #888;
+        font-size: 14px;
+        color: #666;
         font-weight: 400;
-        background-color: #f5f5f5;
+        background-color: #f0f2f5;
         display: inline-block;
-        padding: 5px 15px;
-        border-radius: 15px;
+        padding: 8px 15px;
+        border-radius: 10px;
+        margin-top: 10px;
+        line-height: 1.5;
+        border-left: 4px solid #999;
     }
 
-    /* 5. 隱藏 Streamlit 原生元素 */
+    /* 6. 隱藏 Streamlit 原生元素 */
     [data-testid="stSidebar"] {display: none;}
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     
-    /* 6. 對話氣泡優化 (更像 LINE) */
+    /* 7. 對話氣泡優化 */
     .stChatMessage {
         background-color: #ffffff;
         border-radius: 18px !important;
@@ -90,7 +95,7 @@ st.markdown("""
         margin-bottom: 12px;
     }
     
-    /* 7. 連結樣式 */
+    /* 8. 連結樣式 */
     a {
         color: #2E7D32 !important;
         font-weight: bold;
@@ -103,18 +108,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 標題區塊 HTML (含大頭像) ---
+# --- 標題區塊 HTML (用詞修正為衛教) ---
 st.markdown("""
 <div class="header-container">
     <div class="big-avatar">👨‍⚕️</div>
-    <div class="main-title">海扶及達文西醫療諮詢</div>
-    <div class="sub-title">陳威君醫師的 AI 專屬助理</div>
-    <div class="disclaimer">💡 提供海扶刀與達文西手術的即時衛教資訊<br>(非醫師親自即時回覆)</div>
+    <div class="main-title">海扶及達文西衛教資訊</div>
+    <div class="sub-title">陳威君醫師 AI 衛教小幫手</div>
+    <div class="disclaimer">
+        💡 <b>本平台僅提供一般衛教知識問答</b><br>
+        對話內容由 AI 輔助生成，非醫師親自即時回覆。<br>
+        實際醫療狀況請務必至門診由醫師親自評估。
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 系統核心邏輯 (盲測模型)
+# 2. 系統核心邏輯 (維持不變)
 # ==========================================
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -168,7 +177,7 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
                 embeddings.append([0.0] * 768)
         return embeddings
 
-@st.cache_resource(show_spinner="正在準備資料庫...")
+@st.cache_resource(show_spinner="正在準備衛教資料庫...")
 def initialize_vector_db():
     try:
         client = chromadb.Client()
@@ -203,10 +212,10 @@ collection = initialize_vector_db()
 # ==========================================
 if "messages" not in st.session_state:
     st.session_state.messages = []
-    # 歡迎訊息
+    # 歡迎訊息 (避開 "解答" 這種絕對性字眼，改用 "提供資訊")
     st.session_state.messages.append({
         "role": "assistant", 
-        "content": "您好！我是陳醫師的 **AI 小幫手** 🤖<br>我可以為您解答關於 **海扶刀** 或 **達文西手術** 的常見問題。<br><br>請直接輸入您的疑問 👇"
+        "content": "您好！我是陳醫師的 **AI 衛教小幫手** 🤖<br>我可以為您提供 **海扶刀** 或 **達文西手術** 的相關資訊與常見問答。<br><br>請輸入您想了解的主題 👇"
     })
 
 # 顯示歷史訊息
@@ -228,7 +237,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
     final_response = ""
     
     # 搜尋與回答
-    with st.spinner('🔍 AI 正在查閱衛教資料...'):
+    with st.spinner('🔍 AI 正在查詢衛教資訊...'):
         try:
             results = collection.query(query_texts=[prompt], n_results=1)
             distance = results['distances'][0][0] if results['distances'] else 1.0
@@ -238,7 +247,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
 
             if distance > THRESHOLD:
                 final_response = (
-                    "這個問題比較個別化或複雜，建議您直接至門診諮詢醫師，能獲得更準確的評估喔！🏥<br><br>"
+                    "這個問題比較個別化，建議您直接至門診，由醫師親自為您評估會比較準確喔！🏥<br><br>"
                     "<b>📅 門診時間：</b><br>"
                     "• 林口長庚：週二上午、週六下午<br>"
                     "• 土城醫院：週二下午、週六上午<br><br>"
@@ -247,14 +256,20 @@ if prompt := st.chat_input("請輸入您的問題..."):
             else:
                 model = genai.GenerativeModel(VALID_CHAT_MODEL)
                 system_prompt = f"""
-                你是一位專業、親切且溫暖的婦科諮詢助理，隸屬於陳威君醫師團隊。
+                你是一位專業、親切且溫暖的婦科「衛教助理」，隸屬於陳威君醫師團隊。
+                
+                【任務】
+                根據以下資料庫內容，回答使用者的問題。
+                
                 【使用者問題】{prompt}
-                【資料庫答案】{best_answer}
-                請根據「資料庫答案」重新撰寫回覆：
-                1. 語氣要像真人一樣溫暖、有同理心 (可以使用適量 emoji 如 😊, 💪)。
-                2. 保持專業，內容準確。
-                3. 排版要清晰，適當分段，讓手機閱讀方便。
-                4. 不要提及「根據資料庫」或「標準答案」。
+                【資料庫標準資訊】{best_answer}
+                
+                【回答準則】
+                1. 語氣溫暖、像真人 (可使用 😊, 💪)。
+                2. 僅提供「一般性衛教資訊」，避免做出具體的「醫療診斷」或「保證」。
+                3. 若涉及個別病情，請溫柔提醒需回診評估。
+                4. 排版清晰，適當分段。
+                5. 不要提及「根據資料庫」。
                 """
                 
                 response = model.generate_content(system_prompt)
