@@ -36,7 +36,7 @@ st.markdown(
 )
 
 # ==========================================
-# 2. 自動模型偵測
+# 2. 自動模型偵測 (修正版：預設使用舊模型以保安全)
 # ==========================================
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -48,14 +48,15 @@ else:
 @st.cache_resource
 def get_working_models():
     """自動偵測帳號可用的模型名稱"""
-    chat_model = "models/gemini-1.5-flash" # 預設
-    embed_model = "models/text-embedding-004" # 預設
+    # --- 關鍵修正：預設值改為最舊版，確保不報錯 ---
+    chat_model = "models/gemini-pro" 
+    embed_model = "models/text-embedding-004" 
     
     try:
         all_models = list(genai.list_models())
         model_names = [m.name for m in all_models]
         
-        # 1. 找聊天模型
+        # 1. 找聊天模型 (優先順序：Flash -> Pro -> 預設)
         if any('gemini-1.5-flash' in m for m in model_names):
             chat_model = next(m for m in model_names if 'gemini-1.5-flash' in m)
         elif any('gemini-1.5-pro' in m for m in model_names):
@@ -67,19 +68,19 @@ def get_working_models():
             
         return chat_model, embed_model
     except:
+        # 如果偵測失敗，直接回傳預設值 (gemini-pro)，不再嘗試 Flash
         return chat_model, embed_model
 
 VALID_CHAT_MODEL, VALID_EMBED_MODEL = get_working_models()
 
 # ==========================================
-# 3. 資料庫邏輯 (核心修正：資料庫改名重練)
+# 3. 資料庫邏輯 (含維度修正 v2)
 # ==========================================
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
         embeddings = []
         for text in input:
             try:
-                # 這裡不強制維度，讓它自然產生，因為我們換新資料庫了
                 response = genai.embed_content(
                     model=VALID_EMBED_MODEL,
                     content=text,
@@ -87,11 +88,12 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
                 )
                 embeddings.append(response['embedding'])
             except Exception:
-                # 備用方案
+                # 備用方案：嘗試舊版 Embedding
                 try:
                     res = genai.embed_content(model="models/embedding-001", content=text)
                     embeddings.append(res['embedding'])
                 except:
+                    # 補零防當機
                     embeddings.append([0.0] * 768)
         return embeddings
 
@@ -100,14 +102,12 @@ def initialize_vector_db():
     try:
         client = chromadb.Client()
         
-        # --- 🔑 關鍵修正點：改名為 v2 ---
-        # 這會強制系統忽略舊的 768 維度資料庫，重新建立一個支援 3072 的新資料庫
+        # 維持 v2 名稱，確保使用新維度
         collection = client.get_or_create_collection(
             name="medical_faq_v2",  
             embedding_function=GeminiEmbeddingFunction()
         )
 
-        # 只要是 v2 新建立的，裡面一定是空的，就會自動重新載入 Excel
         if collection.count() == 0:
             excel_file = "網路問答.xlsx"
             if os.path.exists(excel_file):
@@ -163,7 +163,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
             distance = results['distances'][0][0] if results['distances'] else 1.0
             best_answer = results['documents'][0][0] if results['documents'] else ""
 
-            # 2. 判斷信心度 (門檻稍微調鬆一點以適應新維度)
+            # 2. 判斷信心度 (門檻微調)
             THRESHOLD = 0.75 
 
             if distance > THRESHOLD:
@@ -195,6 +195,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
                 )
 
         except Exception as e:
+            # 萬一還是出錯，顯示最後使用的模型名稱以供查核
             final_response = f"⚠️ 系統發生錯誤 (使用模型: {VALID_CHAT_MODEL})。<br>錯誤訊息: {str(e)}"
 
     with st.chat_message("assistant"):
