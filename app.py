@@ -14,36 +14,15 @@ st.set_page_config(
     layout="centered"
 )
 
-# --- 客製化 CSS 樣式表 ---
+# --- 客製化 CSS ---
 st.markdown("""
 <style>
-    /* 1. 整體背景與字體 */
-    .stApp {
-        background-color: #fcfcfc;
-        font-family: "Microsoft JhengHei", sans-serif;
-    }
-    
-    /* 2. 標題樣式 */
-    h1 {
-        color: #2E7D32;
-        font-weight: 700;
-        border-bottom: 2px solid #e0e0e0;
-        padding-bottom: 15px;
-    }
-    
-    /* 3. 隱藏側邊欄與選單 */
+    .stApp { background-color: #fcfcfc; font-family: "Microsoft JhengHei", sans-serif; }
+    h1 { color: #2E7D32; font-weight: 700; border-bottom: 2px solid #e0e0e0; padding-bottom: 15px; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     [data-testid="stSidebar"] {display: none;}
-    
-    /* 4. 對話框優化 */
-    .stChatMessage {
-        border-radius: 15px;
-        border: 1px solid #f0f0f0;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    
-    /* 連結顏色 */
+    .stChatMessage { border-radius: 15px; border: 1px solid #f0f0f0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     a { color: #2E7D32 !important; font-weight: bold; text-decoration: none; }
     a:hover { text-decoration: underline; }
 </style>
@@ -60,8 +39,6 @@ st.markdown(
 # ==========================================
 # 2. 系統設定
 # ==========================================
-
-# 讀取 API Key
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=api_key)
@@ -69,54 +46,51 @@ else:
     st.error("❌ 系統錯誤：未設定 API Key。")
     st.stop()
 
-# --- 強制設定模型 (不再自動偵測，直接指定最新版) ---
-# 這是目前最穩定的組合
-CHAT_MODEL = "models/gemini-1.5-flash"
-EMBED_MODEL = "models/text-embedding-004"
-
 # ==========================================
-# 3. 資料庫邏輯 (含錯誤顯示)
+# 3. 穩健型資料庫邏輯 (自動切換模型)
 # ==========================================
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
+        # 定義備選模型清單
+        model_candidates = ["models/text-embedding-004", "models/embedding-001"]
+        
         embeddings = []
         for text in input:
-            try:
-                response = genai.embed_content(
-                    model=EMBED_MODEL,
-                    content=text,
-                    task_type="retrieval_query"
-                )
-                embeddings.append(response['embedding'])
-            except Exception as e:
-                # 嘗試舊版模型作為備援
+            success = False
+            for model_name in model_candidates:
                 try:
                     response = genai.embed_content(
-                        model="models/embedding-001",
+                        model=model_name,
                         content=text,
                         task_type="retrieval_query"
                     )
                     embeddings.append(response['embedding'])
-                except Exception as e2:
-                    print(f"Embedding Failed: {e2}")
-                    embeddings.append([0.0]*768)
+                    success = True
+                    break # 成功就跳出，不用試下一個
+                except:
+                    continue # 失敗就試下一個
+            
+            if not success:
+                embeddings.append([0.0]*768) # 真的全掛了，回傳空向量防當機
         return embeddings
 
 @st.cache_resource(show_spinner="正在準備醫療資料庫...")
 def initialize_vector_db():
     client = chromadb.Client()
-    
-    # 這裡我們使用 get_or_create 避免錯誤
     try:
         collection = client.get_or_create_collection(
             name="medical_faq",
             embedding_function=GeminiEmbeddingFunction()
         )
-    except Exception as e:
-        st.error(f"資料庫建立失敗: {e}")
-        st.stop()
-    
-    # 若資料庫為空則載入
+    except:
+        # 如果無法建立，嘗試重置
+        chromadb.api.client.SharedSystemClient.clear_system_cache()
+        client = chromadb.Client()
+        collection = client.create_collection(
+            name="medical_faq",
+            embedding_function=GeminiEmbeddingFunction()
+        )
+
     if collection.count() == 0:
         excel_file = "網路問答.xlsx"
         if os.path.exists(excel_file):
@@ -127,26 +101,20 @@ def initialize_vector_db():
                     questions = data['問題'].astype(str).tolist()
                     answers = data['回覆'].astype(str).tolist()
                     ids = [f"id-{i}" for i in range(len(questions))]
-                    
-                    collection.add(
-                        documents=answers,
-                        metadatas=[{"question": q} for q in questions],
-                        ids=ids
-                    )
-            except Exception as e:
-                st.error(f"Excel 讀取失敗: {e}")
+                    collection.add(documents=answers, metadatas=[{"question": q} for q in questions], ids=ids)
+            except:
+                pass
     return collection
 
 try:
     collection = initialize_vector_db()
-except Exception as e:
-    st.error(f"系統初始化失敗: {e}")
+except:
+    st.error("系統初始化異常，請重新整理頁面。")
     st.stop()
 
 # ==========================================
-# 4. 對話邏輯
+# 4. 對話邏輯 (核心修正：生成模型的自動降級)
 # ==========================================
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
     st.session_state.messages.append({
@@ -164,7 +132,6 @@ if prompt := st.chat_input("請輸入您的問題..."):
 
     final_response = ""
     
-    # 使用 spinner 顯示溫暖的提示
     with st.spinner('🤖 醫師小幫手正在查閱資料...'):
         try:
             # 1. 搜尋
@@ -172,7 +139,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
             distance = results['distances'][0][0] if results['distances'] else 1.0
             best_answer = results['documents'][0][0] if results['documents'] else ""
 
-            # 2. 判斷信心度 (閾值)
+            # 2. 判斷信心度
             THRESHOLD = 0.65 
 
             if distance > THRESHOLD:
@@ -184,31 +151,42 @@ if prompt := st.chat_input("請輸入您的問題..."):
                     "💁‍♀️ 專人諮詢：<a href='https://line.me/R/ti/p/@hifudr' target='_blank'>點此聯繫 Line 小編</a>"
                 )
             else:
-                # 3. AI 生成
-                # 這裡直接呼叫，不再 try-catch 包覆所有錯誤，以便顯示真實原因
-                model = genai.GenerativeModel(CHAT_MODEL)
+                # 3. AI 生成 (自動降級邏輯)
+                # 這裡定義一串模型，優先試 1.5-flash，不行試 1.5-pro，再不行試 gemini-pro (舊版)
+                chat_candidates = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro", "gemini-pro"]
                 
-                system_prompt = f"""
-                你是一位專業、親切且溫暖的婦科諮詢助理，隸屬於陳威君醫師團隊。
-                【使用者問題】{prompt}
-                【資料庫答案】{best_answer}
-                請根據「資料庫答案」重新撰寫回覆，語氣像真人一樣溫暖，不要提及「根據資料庫」。
-                """
+                generated_text = ""
                 
-                try:
-                    response = model.generate_content(system_prompt)
-                    final_response = response.text + (
+                for model_name in chat_candidates:
+                    try:
+                        model = genai.GenerativeModel(model_name)
+                        system_prompt = f"""
+                        你是一位專業、親切且溫暖的婦科諮詢助理，隸屬於陳威君醫師團隊。
+                        【使用者問題】{prompt}
+                        【資料庫答案】{best_answer}
+                        請根據「資料庫答案」重新撰寫回覆，語氣像真人一樣溫暖，不要提及「根據資料庫」。
+                        """
+                        response = model.generate_content(system_prompt)
+                        generated_text = response.text
+                        # 成功產生文字，就跳出迴圈
+                        break 
+                    except Exception as e:
+                        # 記錄錯誤但繼續嘗試下一個模型
+                        print(f"Model {model_name} failed: {e}")
+                        continue
+                
+                if generated_text:
+                    final_response = generated_text + (
                         "<br><br>---<br>"
                         "如有更多疑問，歡迎 <a href='https://line.me/R/ti/p/@hifudr' target='_blank'>Line 線上諮詢</a>"
                     )
-                except Exception as api_error:
-                    # 如果主要模型失敗，這裡會顯示錯誤代碼
-                    final_response = f"⚠️ 系統連線異常 (錯誤代碼: {api_error})。請截圖告知管理員。"
+                else:
+                    # 如果所有模型都失敗
+                    final_response = "⚠️ 目前 AI 系統連線忙碌，請稍後再試，或直接聯繫 Line 小編。"
 
         except Exception as e:
-            final_response = f"⚠️ 系統忙碌中 (錯誤代碼: {e})。請稍後再試。"
+            final_response = f"⚠️ 系統發生未知錯誤。請稍後再試。"
 
-    # 顯示回覆
     with st.chat_message("assistant"):
         st.markdown(final_response, unsafe_allow_html=True)
     st.session_state.messages.append({"role": "assistant", "content": final_response})
