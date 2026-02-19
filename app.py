@@ -36,7 +36,7 @@ st.markdown(
 )
 
 # ==========================================
-# 2. 自動偵測可用模型 (核心修正)
+# 2. 自動偵測可用模型
 # ==========================================
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -47,71 +47,58 @@ else:
 
 @st.cache_resource
 def get_working_models():
-    """
-    不猜測模型名稱，直接問 Google 帳號有哪些模型可用。
-    """
-    chat_model = None
-    embed_model = None
+    """自動偵測帳號可用的模型名稱"""
+    chat_model = "models/gemini-pro" # 預設
+    embed_model = "models/embedding-001" # 預設
     
     try:
-        # 列出所有模型
         all_models = list(genai.list_models())
+        model_names = [m.name for m in all_models]
         
         # 1. 找聊天模型
-        # 優先順序: 1.5-flash -> 1.5-pro -> 1.0-pro -> 任何 gemini
-        model_names = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
-        
-        if not model_names:
-            return None, None # 帳號完全沒權限
-            
-        # 自動挑選最佳的
         if any('gemini-1.5-flash' in m for m in model_names):
             chat_model = next(m for m in model_names if 'gemini-1.5-flash' in m)
         elif any('gemini-1.5-pro' in m for m in model_names):
             chat_model = next(m for m in model_names if 'gemini-1.5-pro' in m)
-        else:
-            chat_model = model_names[0] # 有什麼用什麼
-
+            
         # 2. 找嵌入模型
-        embed_names = [m.name for m in all_models if 'embedContent' in m.supported_generation_methods]
-        if any('text-embedding-004' in m for m in embed_names):
-            embed_model = next(m for m in embed_names if 'text-embedding-004' in m)
-        elif embed_names:
-            embed_model = embed_names[0]
-        else:
-            embed_model = "models/embedding-001" # 舊版保底
-
+        if any('text-embedding-004' in m for m in model_names):
+            embed_model = next(m for m in model_names if 'text-embedding-004' in m)
+            
+        return chat_model, embed_model
+    except:
         return chat_model, embed_model
 
-    except Exception as e:
-        # 如果連 list_models 都失敗，代表 Key 真的壞了
-        return None, None
-
-# 執行偵測
 VALID_CHAT_MODEL, VALID_EMBED_MODEL = get_working_models()
 
-if not VALID_CHAT_MODEL:
-    st.error("❌ 嚴重錯誤：您的 API Key 無法存取任何 Google AI 模型。")
-    st.warning("💡 請前往 Google AI Studio，建立一把 **「新專案 (New Project)」** 的 API Key 即可解決。")
-    st.stop()
-
 # ==========================================
-# 3. 資料庫邏輯 (使用偵測到的模型)
+# 3. 資料庫邏輯 (核心修正：格式標準化)
 # ==========================================
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
-        try:
-            response = genai.embed_content(
-                model=VALID_EMBED_MODEL,
-                content=input,
-                task_type="retrieval_query"
-            )
-            if 'embedding' in response:
-                return [response['embedding']]
-            else:
-                return [e for e in response['embedding']]
-        except:
-            return [[0.0]*768 for _ in input]
+        # 建立一個空清單來裝結果
+        embeddings = []
+        
+        # 逐筆處理，確保絕對不會有多餘的括號 nesting 問題
+        for text in input:
+            try:
+                response = genai.embed_content(
+                    model=VALID_EMBED_MODEL,
+                    content=text,
+                    task_type="retrieval_query"
+                )
+                # 確保加入的是一個 list[float]
+                embeddings.append(response['embedding'])
+            except Exception:
+                # 失敗時嘗試舊版模型
+                try:
+                    res = genai.embed_content(model="models/embedding-001", content=text)
+                    embeddings.append(res['embedding'])
+                except:
+                    # 真的沒辦法就補零，避免當機
+                    embeddings.append([0.0] * 768)
+                    
+        return embeddings # 回傳 List[List[float]]
 
 @st.cache_resource(show_spinner="正在準備醫療資料庫...")
 def initialize_vector_db():
@@ -130,6 +117,7 @@ def initialize_vector_db():
                 answers = data['回覆'].astype(str).tolist()
                 ids = [f"id-{i}" for i in range(len(questions))]
                 
+                # 分批寫入
                 batch_size = 20
                 for i in range(0, len(questions), batch_size):
                     end = min(i + batch_size, len(questions))
@@ -188,7 +176,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
                     "💁‍♀️ 專人諮詢：<a href='https://line.me/R/ti/p/@hifudr' target='_blank'>點此聯繫 Line 小編</a>"
                 )
             else:
-                # 3. AI 生成 (使用我們自動偵測到的模型 VALID_CHAT_MODEL)
+                # 3. AI 生成
                 model = genai.GenerativeModel(VALID_CHAT_MODEL)
                 
                 system_prompt = f"""
@@ -208,7 +196,7 @@ if prompt := st.chat_input("請輸入您的問題..."):
                 )
 
         except Exception as e:
-            final_response = f"⚠️ 系統發生錯誤 (使用模型 {VALID_CHAT_MODEL}): {str(e)}"
+            final_response = f"⚠️ 系統發生錯誤 (Code: {str(e)})。請截圖告知管理員。"
 
     with st.chat_message("assistant"):
         st.markdown(final_response, unsafe_allow_html=True)
